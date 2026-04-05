@@ -116,3 +116,60 @@ class TransformerBlock(nn.Module):
         return x2
 
 
+class SimpleTokenizer:
+    def __init__(self, corpus): # 输入语料文本
+        self.chars = ['<pad>'] + sorted(list(set(corpus))) # 把用于填充空位的特殊token <pad>放在第0位，确保它的id为0
+        self.vocab_size = len(self.chars)
+        self.char_to_id = {char:id for id, char in enumerate(self.chars)}
+        self.id_to_char = {id:char for id, char in enumerate(self.chars)}
+    
+    def encode(self, texts):
+        if isinstance(texts, str):
+            texts = [texts]
+        ids = [[0]+[self.char_to_id[char] for char in text] for text in texts] # 在每个文本的开头加一个<pad> token
+        # 填充0使得所有序列长度相同，这样才能转化为tensor
+        max_len = max(len(id_seq) for id_seq in ids)
+        batch_size = len(ids)
+        padded_ids = torch.zeros((batch_size, max_len),dtype=torch.long)  # 使用0进行填充，因为0对应<pad> token
+        for i, id_seq in enumerate(ids):
+            padded_ids[i, :len(id_seq)] = torch.tensor(id_seq)
+        return padded_ids
+    
+    def decode(self, id_seqs):
+        if isinstance(id_seqs, torch.Tensor):
+            id_seqs = id_seqs.tolist()
+        texts = []
+        for id_seq in id_seqs:
+            chars = [self.id_to_char[id] for id in id_seq if id != 0] # 解码时忽略<pad> token
+            text = ''.join(chars)
+            texts.append(text)
+        return texts
+    
+
+class ToyModel(nn.Module):
+    def __init__(self, num_blocks, num_heads=8, d_model=512, max_seq_len=4096, vocab_size=10000):
+        super().__init__()
+        self.transformer_block = TransformerBlock(num_heads, d_model, max_seq_len=max_seq_len) # 这里保证了各层权重始终相同
+        self.num_blocks = num_blocks
+        self.num_heads = num_heads
+        self.d_model = d_model
+        self.max_seq_len = max_seq_len
+        self.vocab_size = vocab_size
+        self.probe = AttentionProbe()
+        self.transformer_block.attention.register_forward_hook(self.probe)
+        self.captured_attention = None
+        self.embedding = nn.Embedding(vocab_size, d_model)  # 新增：词嵌入层，将离散的 token 转换为连续的向量表示
+        # self.embedding的作用: 输入是离散的整数(代表离散的Token)，输出是连续的embedding向量(每个Token对应一个d_model维的向量)，这个映射是可学习的
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)  
+        # 新增：预测头，将 [batch_size, seq_len, d_model] 的 x 转换成 [batch_size, seq_len, vocab_size] 的 logits，表示每个位置上预测下一个 token 的未归一化的对数概率分布。
+    
+    def forward(self, input_ids): # input_ids 的形状为 [batch_size, seq_len]
+        self.probe.reset() # 每次前向传播前重置 probe，清空上一次的观测数据
+        x = self.embedding(input_ids) # 将输入的 token ids 转换为嵌入向量,形状为 [batch_size, seq_len, d_model]
+        for _ in range(self.num_blocks):
+            x = self.transformer_block(x)
+        self.captured_attention = list(self.probe.captured_data) # 显式copy一份数据，避免后续被修改
+        logits = self.lm_head(x) # [batch_size, seq_len, vocab_size]
+        return logits
+
+

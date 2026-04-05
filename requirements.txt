@@ -1,1 +1,1 @@
-torch
+torch matplotlib seaborn
