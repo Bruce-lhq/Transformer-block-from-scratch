@@ -79,28 +79,43 @@ class AttentionSinkExperiment:
                 epoch_loss += loss.item() # 累加当前 batch 的损失
                 num_batches += 1
                 # 打印每个小批次的进度（可选）
-                if num_batches % 50 == 0:
+                if num_batches % 50 == 1:
                     print(f"  Step {num_batches} Loss: {loss.item():.4f}")
+                    if save_path is not None:
+                        checkpoint = {
+                            'model_state_dict': self.model.state_dict(),
+                            'optimizer_state_dict': self.optimizer.state_dict(),
+                            'tokenizer_chars': self.tokenizer.chars,
+                            'tokenizer_char_to_id': self.tokenizer.char_to_id,
+                            'tokenizer_id_to_char': self.tokenizer.id_to_char,
+                            'num_blocks': self.model.num_blocks,
+                            'num_heads': self.model.num_heads,
+                            'd_model': self.model.d_model,
+                            'max_seq_len': self.model.max_seq_len,
+                            'vocab_size': self.model.vocab_size
+                        }
+                        torch.save(checkpoint, save_path)
 
             avg_loss = epoch_loss / num_batches # 计算当前 epoch 的平均损失
             if epoch % log_interval == 0:
                 print(f"Epoch {epoch}, Average Loss: {avg_loss:.4f}")
-
         if save_path is not None:
             checkpoint = {
-                'model_state_dict': self.model.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'tokenizer_chars': self.tokenizer.chars,
-                'tokenizer_char_to_id': self.tokenizer.char_to_id,
-                'tokenizer_id_to_char': self.tokenizer.id_to_char,
-                'num_blocks': self.model.num_blocks,
-                'num_heads': self.model.num_heads,
-                'd_model': self.model.d_model,
-                'max_seq_len': self.model.max_seq_len,
-                'vocab_size': self.model.vocab_size
-            }
+                            'model_state_dict': self.model.state_dict(),
+                            'optimizer_state_dict': self.optimizer.state_dict(),
+                            'tokenizer_chars': self.tokenizer.chars,
+                            'tokenizer_char_to_id': self.tokenizer.char_to_id,
+                            'tokenizer_id_to_char': self.tokenizer.id_to_char,
+                            'num_blocks': self.model.num_blocks,
+                            'num_heads': self.model.num_heads,
+                            'd_model': self.model.d_model,
+                            'max_seq_len': self.model.max_seq_len,
+                            'vocab_size': self.model.vocab_size
+                        }
             torch.save(checkpoint, save_path)
             print(f"Model saved to {save_path}")
+                
+
 
     def visualize_attention(self, text_for_test, layer_idx=-1, head_idx='mean'):
         self.model.eval()
