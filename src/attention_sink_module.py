@@ -53,23 +53,38 @@ class AttentionSinkExperiment:
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         self.criterion = nn.CrossEntropyLoss()  # 交叉熵损失函数
     
-    def train(self, texts_for_train, epochs=100, log_interval=10, save_path=None):
+    def train(self, texts_for_train, batch_size=8, epochs=100, log_interval=10, save_path=None):
         self.model.train()
         with torch.no_grad():
-            original_ids = self.tokenizer.encode(texts_for_train).to(self.device) # [batch_size, seq_len]
-            # 根据全部之前的输入预测下一个输出
-            input_ids = original_ids[:, :-1]  # 输入序列，去掉最后一个token
-            target_ids = original_ids[:, 1:]  # 目标序列，去掉第一个token
+            original_ids = self.tokenizer.encode(texts_for_train) # [batch_size, seq_len]
+            dataset_size = original_ids.shape[0]
 
         for epoch in range(epochs):
-            self.optimizer.zero_grad()
-            output_logits = self.model(input_ids) # [batch_size, seq_len-1, vocab_size]
-            # cross-entropy loss 期望的输入是 [batch_size * (seq_len-1), vocab_size] 的 output_logits 和 [batch_size * (seq_len-1)] 的 target_ids，所以需要reshape
-            loss = self.criterion(output_logits.reshape(-1, self.vocab_size), target_ids.reshape(-1))
-            loss.backward()
-            self.optimizer.step()
+            # 每次 Epoch 打乱数据顺序
+            indices = torch.randperm(dataset_size)
+            original_ids = original_ids[indices]
+            epoch_loss = 0 # 记录当前 epoch 的总损失
+            num_batches = 0 # 记录当前 epoch 处理的 batch 数量
+            # 引入 Mini-batch 内部循环, 每次处理 batch_size 个样本
+            for i in range(0, dataset_size, batch_size):
+                batch_ids = original_ids[i : i + batch_size].to(self.device)  # [batch_size, seq_len]  
+                input_ids = batch_ids[:, :-1]  # [batch_size, seq_len-1]
+                target_ids = batch_ids[:, 1:]  # [batch_size, seq_len-1]
+                self.optimizer.zero_grad()
+                output_logits = self.model(input_ids) # [batch_size, seq_len-1, vocab_size]
+                # cross-entropy loss 期望的输入是 [batch_size * (seq_len-1), vocab_size] 的 output_logits 和 [batch_size * (seq_len-1)] 的 target_ids，所以需要reshape
+                loss = self.criterion(output_logits.reshape(-1, self.vocab_size), target_ids.reshape(-1))
+                loss.backward()
+                self.optimizer.step()
+                epoch_loss += loss.item() # 累加当前 batch 的损失
+                num_batches += 1
+                # 打印每个小批次的进度（可选）
+                if num_batches % 50 == 0:
+                    print(f"  Step {num_batches} Loss: {loss.item():.4f}")
+
+            avg_loss = epoch_loss / num_batches # 计算当前 epoch 的平均损失
             if epoch % log_interval == 0:
-                print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
+                print(f"Epoch {epoch}, Average Loss: {avg_loss:.4f}")
 
         if save_path is not None:
             checkpoint = {
