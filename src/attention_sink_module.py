@@ -58,7 +58,7 @@ class AttentionSinkExperiment:
         else:
             self.writer = None
     
-    def train(self, texts_for_train, batch_size=8, epochs=100, log_interval=10, save_path=None):
+    def train(self, texts_for_train, batch_size=8, epochs=100, log_interval=10, epoch_interval=5, save_path=None):
         self.model.train()
         with torch.no_grad():
             original_ids = self.tokenizer.encode(texts_for_train) # [batch_size, seq_len]
@@ -83,9 +83,8 @@ class AttentionSinkExperiment:
                 self.optimizer.step()
                 epoch_loss += loss.item() # 累加当前 batch 的损失
                 num_batches += 1
-                self.writer.add_scalar('Loss/train', loss.item(), epoch * (dataset_size // batch_size) + num_batches) if self.writer is not None else None
-                # 打印每个小批次的进度（可选）
-                if num_batches % 50 == 1:
+                if i % log_interval == 0:
+                    self.writer.add_scalar('Loss/train', loss.item(), epoch * (dataset_size // batch_size) + num_batches) if self.writer is not None else None
                     print(f"  Step {num_batches} Loss: {loss.item():.4f}")
                     if save_path is not None:
                         checkpoint = {
@@ -103,8 +102,10 @@ class AttentionSinkExperiment:
                         torch.save(checkpoint, save_path)
 
             avg_loss = epoch_loss / num_batches # 计算当前 epoch 的平均损失
-            if epoch % log_interval == 0:
+            if epoch % epoch_interval == 0:
                 print(f"Epoch {epoch}, Average Loss: {avg_loss:.4f}")
+                self.writer.add_scalar('Loss/epoch', avg_loss, epoch) if self.writer is not None else None
+
         if save_path is not None:
             checkpoint = {
                             'model_state_dict': self.model.state_dict(),
