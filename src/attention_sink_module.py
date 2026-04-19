@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from torch.utils.tensorboard import SummaryWriter
 class AttentionSinkExperiment:
-    def __init__(self, num_blocks, corpus=None, num_heads=8, d_model=512, max_seq_len=4096, learning_rate=3e-4, load_from=None, log_dir=None):
+    def __init__(self, num_blocks, corpus=None, num_heads=8, d_model=512, max_seq_len=4096, learning_rate=3e-4, sink_size=4, window_size=10, load_from=None, log_dir=None):
         if torch.backends.mps.is_available():
             self.device = torch.device("mps")
         elif torch.cuda.is_available():
@@ -32,7 +32,9 @@ class AttentionSinkExperiment:
                 num_heads=checkpoint['num_heads'],
                 d_model=checkpoint['d_model'],
                 max_seq_len=checkpoint['max_seq_len'],
-                vocab_size=checkpoint['vocab_size']
+                vocab_size=checkpoint['vocab_size'],
+                sink_size=checkpoint['sink_size'],
+                window_size=checkpoint['window_size']
             )
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.model.to(self.device)
@@ -49,7 +51,7 @@ class AttentionSinkExperiment:
                 raise ValueError("corpus parameter is required when load_from is None")
             self.tokenizer = SimpleTokenizer(corpus)
             self.vocab_size = self.tokenizer.vocab_size
-            self.model = ToyModel(num_blocks, num_heads, d_model, max_seq_len, self.vocab_size)
+            self.model = ToyModel(num_blocks, num_heads, d_model, max_seq_len, self.vocab_size, sink_size=sink_size, window_size=window_size)
             self.model.to(self.device)
             self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         self.criterion = nn.CrossEntropyLoss()  # 交叉熵损失函数
@@ -97,7 +99,9 @@ class AttentionSinkExperiment:
                             'num_heads': self.model.num_heads,
                             'd_model': self.model.d_model,
                             'max_seq_len': self.model.max_seq_len,
-                            'vocab_size': self.model.vocab_size
+                            'vocab_size': self.model.vocab_size,
+                            'sink_size': self.model.sink_size,
+                            'window_size': self.model.window_size
                         }
                         torch.save(checkpoint, save_path)
 
@@ -117,7 +121,9 @@ class AttentionSinkExperiment:
                             'num_heads': self.model.num_heads,
                             'd_model': self.model.d_model,
                             'max_seq_len': self.model.max_seq_len,
-                            'vocab_size': self.model.vocab_size
+                            'vocab_size': self.model.vocab_size,
+                            'sink_size': self.model.sink_size,
+                            'window_size': self.model.window_size
                         }
             torch.save(checkpoint, save_path)
             print(f"Model saved to {save_path}")

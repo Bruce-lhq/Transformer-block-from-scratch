@@ -66,8 +66,8 @@ if __name__ == "__main__":
         load_from = None
     
     # 创建实验对象，训练模型，并可视化注意力图和生成文本
-    experiment = AttentionSinkExperiment(num_blocks=6, corpus=corpus, load_from=load_from,learning_rate=1e-4)
-    experiment.train(texts_for_train, save_path="attention_sink_checkpoint.pth", epochs=20, log_interval=5)
+    experiment = AttentionSinkExperiment(num_blocks=6, corpus=corpus, load_from=load_from,learning_rate=1e-4, sink_size=4, window_size=10, log_dir="runs/attention_sink_experiment")
+    experiment.train(texts_for_train, save_path="attention_sink_checkpoint.pth", epochs=100, log_interval=5, epoch_interval=1, batch_size=16)
     test_text = "你好，你好，你好，很高兴认识你！"
     experiment.visualize_attention(test_text, layer_idx=-1, head_idx='mean')
     print("Generated text:", experiment.generate(test_text, max_new_tokens=100))

@@ -68,6 +68,95 @@ class MultiHeadAttention(nn.Module):
         return H
 
 
+class StreamingMultiHeadAttention(MultiHeadAttention):
+    def __init__(self, num_heads, d_model, sink_size=4, window_size=10, max_seq_len=4096):
+        super().__init__(num_heads, d_model, max_seq_len=max_seq_len)  
+        self.sink_size = sink_size
+        self.window_size = window_size
+        self.max_cache_len = sink_size + window_size
+        self.register_buffer('k_cache', None, persistent=False) 
+        self.register_buffer('v_cache', None, persistent=False)
+        self.seq_len = 0 # 当前已经处理的总序列长度，初始为0
+
+    def forward(self, x_new): 
+        batch_size = x_new.shape[0]
+        seq_len_new = x_new.shape[1] 
+        # 无论哪种情况，都需要先计算出纯净的 Q, K, V (借用父类的线性层)
+        Q_new = self.W_Q(x_new).view(batch_size, seq_len_new, self.num_heads, self.d_k).transpose(1, 2)
+        K_new = self.W_K(x_new).view(batch_size, seq_len_new, self.num_heads, self.d_k).transpose(1, 2)
+        V_new = self.W_V(x_new).view(batch_size, seq_len_new, self.num_heads, self.d_k).transpose(1, 2)
+        # 初始化预分配固定内存 (Ring Buffer)
+        if self.k_cache is None or self.k_cache.shape[0] != batch_size:
+            self.k_cache = torch.zeros((batch_size, self.num_heads, self.max_cache_len, self.d_k), device=x_new.device, dtype=K_new.dtype)
+            self.v_cache = torch.zeros_like(self.k_cache)
+            self.seq_len = 0 
+        # ============================================================
+        # 分成两大阶段：预填充阶段(prefill)和流式解码阶段(decoding)
+        if seq_len_new>1:
+            # 预填充阶段(prefill),输入一段长提示词
+            if seq_len_new <= self.max_cache_len:
+                ### 还没超长，全部存下
+                self.k_cache[:, :, :seq_len_new, :] = K_new
+                self.v_cache[:, :, :seq_len_new, :] = V_new
+            else:
+                ### 超长了，存满 sink_size 的部分，剩余的部分只保留最后 window_size 的部分
+                self.k_cache[:, :, :self.sink_size, :] = K_new[:, :, :self.sink_size, :]
+                self.v_cache[:, :, :self.sink_size, :] = V_new[:, :, :self.sink_size, :]
+                self.k_cache[:, :, self.sink_size:, :] = K_new[:, :, -self.window_size:, :]
+                self.v_cache[:, :, self.sink_size:, :] = V_new[:, :, -self.window_size:, :]
+            ## 更新当前序列长度
+            self.seq_len = seq_len_new
+            ## 按照父类的逻辑继续计算注意力
+            Q_rotated = self.rope(Q_new)
+            K_rotated = self.rope(K_new)
+            ### 缩放点积注意力与因果掩码 Causal Masking
+            #### Query-Key 点积计算注意力得分
+            scores = torch.matmul(Q_rotated, K_rotated.transpose(-2, -1)) / (self.d_k ** 0.5)  # [batch_size, num_heads, seq_len, seq_len]
+            #### 因果掩码和 softmax 计算注意力权重
+            Attention = F.softmax(scores + self.mask[..., :seq_len_new, :seq_len_new], dim=-1)  # [batch_size, num_heads, seq_len, seq_len]
+            self.captured_attention = Attention  # **新增**：捕获注意力矩阵，用hook记录下来，方便后续分析
+            #### 乘以 Value 完成加权求和
+            Out = torch.matmul(Attention, V_new)  # [batch_size, num_heads, seq_len, d_k]
+            ### 多头拼接并乘以输出矩阵(必须先内存连续化(contiguous)再view，否则会报错)
+            Out = Out.transpose(1, 2).contiguous().view(batch_size, seq_len_new, -1)  # [batch_size, seq_len, d_model]
+            H = self.W_O(Out)  # [batch_size, seq_len, d_model]
+            return H
+        # ============================================================
+        else:
+            # 流式解码阶段(decoding),每次输入一个新 token
+            ## 计算插入索引并原位更新
+            if self.seq_len < self.max_cache_len:
+                insert_idx = self.seq_len
+            else:
+                insert_idx = self.sink_size + (self.seq_len-self.sink_size) % self.window_size
+            self.k_cache[:, :, insert_idx:insert_idx+1, :] = K_new
+            self.v_cache[:, :, insert_idx:insert_idx+1, :] = V_new
+            ## 提取出当前有效的 Cache 进行 Attention 计算
+            if self.seq_len < self.max_cache_len:
+                K_active = self.k_cache[:, :, :self.seq_len+1, :]
+                V_active = self.v_cache[:, :, :self.seq_len+1, :]
+            else:
+                K_active = torch.cat((self.k_cache[:, :, :self.sink_size, :], self.k_cache[:, :, insert_idx+1:, :], self.k_cache[:, :, self.sink_size:insert_idx+1, :]), dim=2)
+                V_active = torch.cat((self.v_cache[:, :, :self.sink_size, :], self.v_cache[:, :, insert_idx+1:, :], self.v_cache[:, :, self.sink_size:insert_idx+1, :]), dim=2)
+            self.seq_len += 1
+            ## RoPE位置编码
+            K_active = self.rope(K_active)
+            pad_len = K_active.shape[2]
+            dummy_Q = torch.zeros((batch_size, self.num_heads, pad_len, self.d_k), device=x_new.device, dtype=x_new.dtype)
+            dummy_Q[:, :, -1:, :] = Q_new  # 只在最后一个位置放入新计算的 Q，其他位置全是0，这样就能正确地应用 RoPE 位置编码
+            dummy_Q = self.rope(dummy_Q)
+            Q_new = dummy_Q[:, :, -1:, :]  # 提取出最后一个位置的 Q，形状仍然是 [batch_size, num_heads, 1, d_k]
+            ## 缩放点积注意力
+            ### 单步生成时，不需要 Causal Mask！因为所有的 K 都是历史或现在，根本不存在未来的信息泄露问题了。
+            scores = torch.matmul(Q_new, K_active.transpose(-2, -1)) / self.d_k ** 0.5
+            Attention = F.softmax(scores, dim=-1)
+            self.captured_attention = Attention
+            Out = torch.matmul(Attention, V_active)
+            Out = Out.transpose(1, 2).contiguous().view(batch_size, 1, -1)
+            H = self.W_O(Out)
+            return H
+        
+
 class AttentionProbe:
     def __init__(self):
         self.captured_data = []
@@ -92,12 +181,12 @@ class SwiGLU(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, num_heads, d_model, max_seq_len=4096, multiplier=4):
+    def __init__(self, num_heads, d_model, max_seq_len=4096, multiplier=4, sink_size=4, window_size=10):
         super().__init__()
         # 用 RMSNorm 类而不是函数，因为它自动包含了可学习的缩放参数
         self.rmsnorm1 = nn.RMSNorm(d_model)  # 第一次归一化 Pre-RMSNorm
         self.rmsnorm2 = nn.RMSNorm(d_model)  # 第二次归一化
-        self.attention = MultiHeadAttention(num_heads, d_model, max_seq_len=max_seq_len)
+        self.attention = StreamingMultiHeadAttention(num_heads, d_model, sink_size=sink_size, window_size=window_size, max_seq_len=max_seq_len)
         self.ffn = SwiGLU(d_model, d_model * multiplier)
     
     def forward(self, x):
@@ -147,9 +236,9 @@ class SimpleTokenizer:
     
 
 class ToyModel(nn.Module):
-    def __init__(self, num_blocks, num_heads=8, d_model=512, max_seq_len=4096, vocab_size=10000):
+    def __init__(self, num_blocks, num_heads=8, d_model=512, max_seq_len=4096, vocab_size=10000, sink_size=4, window_size=10):
         super().__init__()
-        self.transformer_block = TransformerBlock(num_heads, d_model, max_seq_len=max_seq_len) # 这里保证了各层权重始终相同
+        self.transformer_block = TransformerBlock(num_heads, d_model, max_seq_len=max_seq_len, sink_size=sink_size, window_size=window_size) # 这里保证了各层权重始终相同
         self.num_blocks = num_blocks
         self.num_heads = num_heads
         self.d_model = d_model
@@ -158,6 +247,8 @@ class ToyModel(nn.Module):
         self.probe = AttentionProbe()
         self.transformer_block.attention.register_forward_hook(self.probe)
         self.captured_attention = None
+        self.sink_size = sink_size
+        self.window_size = window_size
         self.embedding = nn.Embedding(vocab_size, d_model)  # 新增：词嵌入层，将离散的 token 转换为连续的向量表示
         # self.embedding的作用: 输入是离散的整数(代表离散的Token)，输出是连续的embedding向量(每个Token对应一个d_model维的向量)，这个映射是可学习的
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)  
