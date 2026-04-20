@@ -232,6 +232,37 @@ class AttentionSinkExperiment:
         print(f"Cloze Accuracy: {accuracy:.4f} ({correct}/{total} tokens)")
         return accuracy
 
+    def evaluate_sink_rate(self, texts, batch_size=32):
+        """评估注意力沉降率：sink tokens 获得的平均注意力比例"""
+        self.model.eval()
+        self.model.reset_cache()
+        sink_size = self.model.sink_size
+
+        all_ids = self.tokenizer.encode(texts).to(self.device)
+        layer_sink_rates = []  # [batch_count, num_layers]
+
+        with torch.no_grad():
+            for i in range(0, all_ids.shape[0], batch_size):
+                batch_ids = all_ids[i:i + batch_size]
+                _ = self.model(batch_ids)
+                batch_rates = []
+                for attn in self.model.captured_attention:
+                    # attn: [batch, num_heads, seq_len, seq_len] (numpy)
+                    seq_len = attn.shape[-1]
+                    # 每个 query 位置对前 sink_size 个 key 的注意力之和
+                    sink_attn = attn[:, :, :, :min(sink_size, seq_len)].sum(axis=-1)
+                    rate = sink_attn.mean().item()
+                    batch_rates.append(rate)
+                layer_sink_rates.append(batch_rates)
+
+        n_layers = len(layer_sink_rates[0])
+        per_layer = [sum(b[i] for b in layer_sink_rates) / len(layer_sink_rates) for i in range(n_layers)]
+        overall = sum(per_layer) / len(per_layer)
+        print(f"Sink Rate (overall, sink_size={sink_size}): {overall:.4f}")
+        for i, r in enumerate(per_layer):
+            print(f"  Layer {i}: {r:.4f}")
+        return overall, per_layer
+
     def train_text_classification(self, train_texts, train_labels, num_classes, val_texts=None, val_labels=None, epochs=10, batch_size=32, lr=1e-3, save_path=None):
         """训练文本分类头（冻结 backbone），支持验证集监控，可选保存到 .pth"""
         from sklearn.metrics import f1_score, accuracy_score

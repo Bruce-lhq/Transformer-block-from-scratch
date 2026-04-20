@@ -161,10 +161,20 @@ class AttentionProbe:
     def __init__(self):
         self.captured_data = []
     def __call__(self, module, input, output):
-        attention = module.captured_attention.detach().cpu().numpy() 
+        attention = module.captured_attention.detach().cpu().numpy()
         self.captured_data.append(attention)
     def reset(self):
-        self.captured_data = [] 
+        self.captured_data = []
+
+
+class HiddenStateProbe:
+    """捕获 TransformerBlock 每次调用的输出（即每层的隐藏状态）"""
+    def __init__(self):
+        self.captured_data = []
+    def __call__(self, module, input, output):
+        self.captured_data.append(output.detach().cpu())
+    def reset(self):
+        self.captured_data = []
 
 
 class SwiGLU(nn.Module):
@@ -246,6 +256,8 @@ class ToyModel(nn.Module):
         self.vocab_size = vocab_size
         self.probe = AttentionProbe()
         self.transformer_block.attention.register_forward_hook(self.probe)
+        self.hidden_probe = HiddenStateProbe()
+        self.transformer_block.register_forward_hook(self.hidden_probe)
         self.captured_attention = None
         self.sink_size = sink_size
         self.window_size = window_size
@@ -280,6 +292,7 @@ class ToyModel(nn.Module):
 
     def forward(self, input_ids): # input_ids 的形状为 [batch_size, seq_len]
         self.probe.reset() # 每次前向传播前重置 probe，清空上一次的观测数据
+        self.hidden_probe.reset()
         x = self.embedding(input_ids) # 将输入的 token ids 转换为嵌入向量,形状为 [batch_size, seq_len, d_model]
         for i in range(self.num_blocks):
             self._load_layer_cache(i)   # 换入第 i 个虚拟层的 cache
@@ -292,6 +305,7 @@ class ToyModel(nn.Module):
     def forward_hidden(self, input_ids):
         """只返回 transformer 隐藏状态，不经过 lm_head（供分类头使用）"""
         self.probe.reset()
+        self.hidden_probe.reset()
         x = self.embedding(input_ids)
         for i in range(self.num_blocks):
             self._load_layer_cache(i)
@@ -302,6 +316,7 @@ class ToyModel(nn.Module):
     def forward_from_embedding(self, x):
         """直接接受 embedding 后的输入，跳过 token embedding（供非文本下游任务使用）"""
         self.probe.reset()
+        self.hidden_probe.reset()
         for i in range(self.num_blocks):
             self._load_layer_cache(i)
             x = self.transformer_block(x)
